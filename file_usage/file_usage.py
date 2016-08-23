@@ -8,6 +8,7 @@ from termcolor import colored, cprint
 DEFAULT_PERCENT_THRESHOLD = 1.0 
 DEFAULT_SHOW_USERS = False
 DEFAULT_INDENT = 8
+DEFAULT_PRECISION = 1
 
 def parse_args():
     '''Parse command line arguments.
@@ -29,6 +30,23 @@ def parse_args():
         default=DEFAULT_INDENT,
         help='Directory level indentation in output (default {})'.format(
             DEFAULT_INDENT))
+    parser.add_argument(
+        '--precision',
+        metavar='N',
+        type=int,
+        default=DEFAULT_PRECISION,
+        help='Number of decimal places to display in file/directory sizes in GB (default {})'.format(
+            DEFAULT_PRECISION))
+    parser.add_argument(
+        '--path',
+        metavar='STR',
+        type=str,
+        help='Only consider files/directories with this path as their prefix')
+    parser.add_argument(
+        '--user',
+        metavar='STR',
+        type=str,
+        help='Only consider files/directories owned by this user')
     parser.add_argument('--showusers', action='store_true',
         default=DEFAULT_SHOW_USERS,
         help='Show usernames associated with files/directories in the output')
@@ -77,8 +95,9 @@ def size_in_bytes(size_str):
     # the input file size
     exit("Bad file size in input: '{}'".format(size_str))
 
-def size_in_gb(bytes):
-    return "{:.1f}".format(float(bytes) / UNITS_IN_BYTES["G"])
+def size_in_gb_str(bytes, precision):
+    format_str = '{{:.{}f}}'.format(precision)
+    return format_str.format(float(bytes) / UNITS_IN_BYTES["G"])
 
 class Branch(object):
     def __init__(self):
@@ -92,10 +111,11 @@ def is_big_enough(size, total_size, threshold):
    return (size / total_size) * 100.0 >= threshold 
 
 class SizeTree(object):
-    def __init__(self, show_users=DEFAULT_SHOW_USERS, indent=DEFAULT_INDENT):
+    def __init__(self, show_users=DEFAULT_SHOW_USERS, indent=DEFAULT_INDENT, precision=DEFAULT_PRECISION):
         self.tree = {}
         self.show_users = show_users
         self.indent = indent
+        self.precision = precision
 
     def insert(self, path_str, size_bytes, user):
         path_list = splitall(path_str)
@@ -119,6 +139,9 @@ class SizeTree(object):
             branch_size = branch.size() 
             if is_big_enough(branch_size, total_size, proportion_threshold):
 
+                # Try to collapse directories which contain just one file.
+                # This helps avoid gratuitous nesting in the output, especially
+                # for paths which are sticks.
                 path = item 
                 while len(branch.children) == 1:
                     for item, branch in branch.children.items():
@@ -128,35 +151,56 @@ class SizeTree(object):
                             path += '/' + item 
 
                 indent = ' ' * (self.indent * current_depth)
-                print("{}{} ({} GB)".format(indent, colored(path, 'blue'), size_in_gb(branch_size)))
+                print("{}{} ({} GB)".format(indent, colored(path, 'blue'), size_in_gb_str(branch_size, self.precision)))
                 if self.show_users:
                     for user, user_size in sorted(branch.users.items(), key=lambda x: x[1], reverse=True):
                         if is_big_enough(user_size, total_size, proportion_threshold):
-                            print("{}  - {}: {} GB".format(indent, colored(user, 'red'), size_in_gb(user_size)))
+                            print("{}  - {}: {} GB".format(indent, colored(user, 'red'), size_in_gb_str(user_size, self.precision)))
                 self.display_rec(branch.children, current_depth + 1, total_size, proportion_threshold)
-            
+
+
+def consider_file(args, user, path):
+    result = True
+    if args.path and (not (path.startswith(args.path))):
+        result = False
+    if args.user and (not (user == args.user)):
+        result = False
+    return result
 
 def main():
     args = parse_args()
-    size_tree = SizeTree(args.showusers, args.indent)
+    size_tree = SizeTree(args.showusers, args.indent, args.precision)
     user_usage = defaultdict(int)
+    num_skipped_lines = 0
+
     for line in sys.stdin:
         fields = line.split()
         if len(fields) >= 3:
             size, user, path = fields[:3]
-            this_bytes = size_in_bytes(size)
-            user_usage[user] += this_bytes
-            size_tree.insert(path, this_bytes, user)
+            #if not(args.path) or (args.path and path.startswith(args.path)):
+            if consider_file(args, user, path):
+                this_bytes = size_in_bytes(size)
+                user_usage[user] += this_bytes
+                size_tree.insert(path, this_bytes, user)
         else:
-            print("Skipping '{}'".format(line))
-    total_usage = 0
-    print("User totals:\n")
-    for user, usage in sorted(user_usage.items(), key=lambda x: x[1], reverse=True):
-        print("{}: {} GB".format(colored(user, 'red'), size_in_gb(usage))) 
-        total_usage += usage 
-    print("\nTotal: {} GB".format(size_in_gb(total_usage)))
-    print("\nDirectory breakdown:\n")
-    size_tree.display(total_usage, args.thresh)
+            num_skipped_lines += 1 
+
+    if num_skipped_lines > 0:
+        print("Skipped {} lines in input.".format(num_skipped_lines))
+
+    total_usage = sum([usage for user, usage in user_usage.items()]) 
+
+    if total_usage > 0:
+
+        if args.showusers:
+            print("User totals:\n")
+            for user, usage in sorted(user_usage.items(), key=lambda x: x[1], reverse=True):
+                print("{}: {} GB".format(colored(user, 'red'), size_in_gb_str(usage, args.precision))) 
+
+            print("\nTotal: {} GB\n".format(size_in_gb_str(total_usage, args.precision)))
+        size_tree.display(total_usage, args.thresh)
+    else:
+        print("\nTotal usage is 0 GB, nothing to show.")
 
 if __name__ == '__main__':
     main()
