@@ -61,6 +61,7 @@ UNITS_IN_BYTES = {
     "T": 1024 ** 4 
 }
 
+# Split a file path into a list of components.
 # from: https://www.safaribooksonline.com/library/view/python-cookbook/0596001673/ch04s16.html
 def splitall(path):
     allparts = []
@@ -99,13 +100,24 @@ def size_in_gb_str(bytes, precision):
     format_str = '{{:.{}f}}'.format(precision)
     return format_str.format(float(bytes) / UNITS_IN_BYTES["G"])
 
+class User(object):
+    def __init__(self, size=0.0, count=0, precision=DEFAULT_PRECISION):
+        self.size = size 
+        self.count = count
+        self.precision = precision
+
+    def __str__(self):
+        size_str = size_in_gb_str(self.size, self.precision)
+        text = "size = {}, count = {}".format(size_str, self.count)
+        return colored(text, 'yellow')
+
 class Branch(object):
     def __init__(self):
         self.children = {} 
-        self.users = defaultdict(int)
+        self.users = {} 
 
     def size(self):
-        return sum([user_size for (user, user_size) in self.users.items()])
+        return sum([user_stats.size for (user_name, user_stats) in self.users.items()])
 
 def is_big_enough(size, total_size, threshold):
    return (size / total_size) * 100.0 >= threshold 
@@ -117,16 +129,24 @@ class SizeTree(object):
         self.indent = indent
         self.precision = precision
 
-    def insert(self, path_str, size_bytes, user):
+    def insert(self, path_str, size_bytes, user_name):
         path_list = splitall(path_str)
         tree = self.tree
         for item in path_list:
             if len(item.strip()) > 0:
                 if item not in tree:
-                    tree[item] = Branch()
-                this_branch = tree[item]
-                this_users = this_branch.users
-                this_users[user] += size_bytes
+                    this_branch = Branch()
+                    tree[item] = this_branch
+                    this_branch.users = { user_name : User(size_bytes, 1, self.precision) } 
+                else:
+                    this_branch = tree[item]
+                    this_users = this_branch.users
+                    if user_name in this_users:
+                        this_user = this_users[user_name]
+                        this_user.size += size_bytes
+                        this_user.count += 1
+                    else:
+                        this_users[user_name] = User(size_bytes, 1, self.precision)
                 tree = this_branch.children
 
     def display(self, total_size, proportion_threshold):
@@ -153,52 +173,61 @@ class SizeTree(object):
                 indent = ' ' * (self.indent * current_depth)
                 print("{}{} ({} GB)".format(indent, colored(path, 'blue'), size_in_gb_str(branch_size, self.precision)))
                 if self.show_users:
-                    for user, user_size in sorted(branch.users.items(), key=lambda x: x[1], reverse=True):
+                    for user, user_stats in sorted(branch.users.items(), key=lambda x: x[1].size, reverse=True):
+                        user_size = user_stats.size
+                        #user_count = user_stats.count
                         if is_big_enough(user_size, total_size, proportion_threshold):
-                            print("{}  - {}: {} GB".format(indent, colored(user, 'red'), size_in_gb_str(user_size, self.precision)))
+                            #print("{}  - {}: {} GB, {}".format(indent, colored(user, 'red'),
+                            #      size_in_gb_str(user_size, self.precision), colored(user_count, 'yellow')))
+                            print("{}  - {}: {}".format(indent, colored(user, 'red'), user_stats))
                 self.display_rec(branch.children, current_depth + 1, total_size, proportion_threshold)
 
 
-def consider_file(args, user, path):
+def consider_file(args, user_name, path):
     result = True
     if args.path and (not (path.startswith(args.path))):
         result = False
-    if args.user and (not (user == args.user)):
+    if args.user and (not (user_name == args.user)):
         result = False
     return result
 
 def main():
     args = parse_args()
     size_tree = SizeTree(args.showusers, args.indent, args.precision)
-    user_usage = defaultdict(int)
+    user_usage = {} 
     num_skipped_lines = 0
 
     for line in sys.stdin:
         fields = line.split()
         if len(fields) >= 3:
-            size, user, path = fields[:3]
-            #if not(args.path) or (args.path and path.startswith(args.path)):
-            if consider_file(args, user, path):
+            size, user_name, path = fields[:3]
+            if consider_file(args, user_name, path):
                 this_bytes = size_in_bytes(size)
-                user_usage[user] += this_bytes
-                size_tree.insert(path, this_bytes, user)
+                if user_name not in user_usage:
+                    user_usage[user_name] = User(this_bytes, 1, args.precision)
+                else:
+                    user_usage[user_name].size += this_bytes
+                    user_usage[user_name].count += 1 
+                size_tree.insert(path, this_bytes, user_name)
         else:
             num_skipped_lines += 1 
 
     if num_skipped_lines > 0:
         print("Skipped {} lines in input.".format(num_skipped_lines))
 
-    total_usage = sum([usage for user, usage in user_usage.items()]) 
+    total_size_usage = sum([user_stats.size for user, user_stats in user_usage.items()]) 
+    total_count = sum([user_stats.count for user, user_stats in user_usage.items()]) 
 
-    if total_usage > 0:
+    if total_count > 0:
 
         if args.showusers:
             print("User totals:\n")
-            for user, usage in sorted(user_usage.items(), key=lambda x: x[1], reverse=True):
-                print("{}: {} GB".format(colored(user, 'red'), size_in_gb_str(usage, args.precision))) 
+            for user, user_stats in sorted(user_usage.items(), key=lambda x: x[1], reverse=True):
+                print("{}: {}".format(colored(user, 'red'), user_stats)) 
 
-            print("\nTotal: {} GB\n".format(size_in_gb_str(total_usage, args.precision)))
-        size_tree.display(total_usage, args.thresh)
+            print("\nTotal size:  {} GB".format(size_in_gb_str(total_size_usage, args.precision)))
+            print("Total count: {}\n".format(total_count))
+        size_tree.display(total_size_usage, args.thresh)
     else:
         print("\nTotal usage is 0 GB, nothing to show.")
 
